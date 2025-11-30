@@ -1,147 +1,149 @@
-import os
+import pandas as pd
 import uuid
 import numpy as np
-import pandas as pd
-
-def bucket_age_fine(age: pd.Series) -> pd.Series:
-    bins   = [0, 20, 24, 29, 34, 40, 120]
-    labels = ["<=20", "21-24", "25-29", "30-34", "35-40", "40+"]
-    return pd.cut(age, bins=bins, labels=labels, include_lowest=True)
-
-def bucket_height_fine(h: pd.Series) -> pd.Series:
-    bins   = [0, 170, 175, 180, 185, 190, 300]
-    labels = ["<170", "170-174", "175-179", "180-184", "185-189", "190+"]
-    return pd.cut(h, bins=bins, labels=labels, include_lowest=True)
-
-def nat_to_region_fine(nat: pd.Series) -> pd.Series:
-    m = {
-        "Brazil": "SA", "Argentina": "SA",
-        "Spain": "EU", "Germany": "EU",
-        "USA": "NA", "Japan": "AS", "Nigeria": "AF",
-    }
-    return nat.map(m).fillna("OTHER")
-
-
-AGE_COARSE_MAP = {
-    "<=20": "<=24",
-    "21-24": "<=24",
-    "25-29": "25-34",
-    "30-34": "25-34",
-    "35-40": "35+",
-    "40+": "35+",
-}
-HEIGHT_COARSE_MAP = {
-    "<170": "<=175",
-    "170-174": "<=175",
-    "175-179": "176-185",
-    "180-184": "176-185",
-    "185-189": ">=186",
-    "190+": ">=186",
-}
-POS_COARSE_MAP = {"GK": "GK", "DEF": "OUTFIELD", "MID": "OUTFIELD", "FWD": "OUTFIELD"}
-
-
-def generalize_series_with_map(sr: pd.Series, mapping: dict) -> pd.Series:
-    as_str = sr.astype(str)
-    return as_str.map(lambda v: mapping.get(v, v))
-
-def add_noise_value(v: pd.Series, sigma: float = 0.12, seed: int = 42) -> pd.Series:
-    rng = np.random.default_rng(seed)
-    noise = rng.lognormal(mean=0, sigma=sigma, size=len(v))
-    return (v * noise).round(-2)
 
 # ============================================================
-# k-anonimato sem '*'
+# Generalização fina dos atributos
 # ============================================================
-def enforce_k_soft(anon: pd.DataFrame, qids: list[str], k: int = 3, seed: int = 7) -> pd.DataFrame:
-    out = anon.copy()
-    rng = np.random.default_rng(seed)
 
-    for q in qids:
-        out[q] = out[q].astype(object)
+def bucket_age_fine(age):
+    if age <= 20: return "≤20"
+    if age <= 25: return "21–25"
+    if age <= 30: return "26–30"
+    if age <= 35: return "31–35"
+    return ">35"
 
-    def group_counts(df):
-        return df.groupby(qids, observed=False).size().reset_index(name="n")
+def bucket_height_fine(h):
+    if h < 170: return "<170"
+    if h < 180: return "170–179"
+    if h < 190: return "180–189"
+    return "≥190"
 
-    def rare_mask(df):
-        g = group_counts(df)
-        rare = g[g["n"] < k][qids]
-        if rare.empty:
-            return pd.Series(False, index=df.index)
-        m = df.merge(rare.assign(_r=1), on=qids, how="left")["_r"].fillna(0).astype(int).eq(1)
-        return m
+def nat_to_region_fine(n):
+    eu = ["France", "Germany", "Spain", "Italy", "Portugal", "England"]
+    sa = ["Brazil", "Argentina"]
+    if n in eu: return "Europe"
+    if n in sa: return "South America"
+    return "Other"
 
-    # Paso 1 a 5
-    for col, mapping in [
-        ("height_bucket", HEIGHT_COARSE_MAP),
-        ("age_bucket", AGE_COARSE_MAP),
-        ("pos_group", POS_COARSE_MAP)
-    ]:
-        mask = rare_mask(out)
-        if mask.any():
-            out.loc[mask, col] = generalize_series_with_map(out.loc[mask, col], mapping)
+# ============================================================
+# Perturbação numérica
+# ============================================================
 
-    mask = rare_mask(out)
-    if mask.any():
-        out.loc[mask, "region_nat"] = "GLOBAL"
+def add_noise_value(val):
+    noise = np.random.uniform(-0.04, 0.04)
+    return int(val * (1 + noise))
 
-    mask = rare_mask(out)
-    if mask.any():
-        common_region = out["region_nat"].value_counts().idxmax()
-        out.loc[mask, "region_nat"] = common_region
+# ============================================================
+# AGRUPAMENTO POR SIMILARIDADE (NOVO REQUISITO)
+# ============================================================
 
-    # Embaralhamento leve
-    final_groups = out.groupby(qids, observed=False).groups
-    for shuffle_cols in [["pace"], ["market_value_eur_noisy"]]:
-        for _, idx in final_groups.items():
-            idx = list(idx)
-            if len(idx) > 1:
-                for col in shuffle_cols:
-                    out.loc[idx, col] = rng.permutation(out.loc[idx, col].values)
+def group_players_by_similarity(df: pd.DataFrame) -> dict:
+    """
+    Agrupa jogadores por características similares:
+    - age_bucket
+    - height_bucket
+    - pos_group
+    """
+    groups = {}
+
+    for idx, row in df.iterrows():
+        key = (
+            str(row["age_bucket"]),
+            str(row["height_bucket"]),
+            str(row["pos_group"]),
+        )
+
+        if key not in groups:
+            groups[key] = []
+
+        groups[key].append(idx)
+
+    return groups
+
+
+def add_group_id(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Atribui um UUID para cada grupo de jogadores semelhantes.
+    """
+    out = df.copy()
+    groups = group_players_by_similarity(df)
+
+    out["group_id"] = None
+
+    for key, idx_list in groups.items():
+        gid = uuid.uuid4().hex
+        out.loc[idx_list, "group_id"] = gid
 
     return out
 
 # ============================================================
-# Função principal
+# K-ANONIMIDADE SUAVE
 # ============================================================
+
+def enforce_k_soft(df, quasi_identifiers, k=3):
+    """
+    Verifica se cada combinação QID tem pelo menos k elementos.
+    Se não tiver, generaliza automaticamente.
+    """
+    out = df.copy()
+
+    for q in quasi_identifiers:
+        out[q] = out[q].astype(str)
+
+    while True:
+        counts = out.groupby(quasi_identifiers).size()
+
+        violators = counts[counts < k]
+
+        if len(violators) == 0:
+            break
+
+        for key in violators.index:
+            mask = np.ones(len(key), dtype=bool)
+            generalization = "OTHER"
+            out.loc[
+                (out[quasi_identifiers] == key).all(axis=1),
+                quasi_identifiers[-1]
+            ] = generalization
+
+    return out
+
+# ============================================================
+# PIPELINE COMPLETA DE ANONIMIZAÇÃO
+# ============================================================
+
 def anonymize(raw: pd.DataFrame, k: int = 3) -> pd.DataFrame:
     anon = pd.DataFrame()
 
+    # 1. Criar identificador irreversível
     anon["player_id"] = [uuid.uuid4().hex for _ in range(len(raw))]
 
-    anon["age_bucket"]    = bucket_age_fine(raw["age"])
-    anon["height_bucket"] = bucket_height_fine(raw["height_cm"])
+    # 2. Generalizações
+    anon["age_bucket"]    = raw["age"].map(bucket_age_fine)
+    anon["height_bucket"] = raw["height_cm"].map(bucket_height_fine)
     anon["pos_group"]     = raw["position"]
-    anon["region_nat"]    = nat_to_region_fine(raw["nationality"])
+    anon["region_nat"]    = raw["nationality"].map(nat_to_region_fine)
 
+    # 3. Atributos não identificadores
     anon["pace"] = raw["pace"]
+    anon["market_value_eur_noisy"] = raw["market_value_eur"].map(add_noise_value)
 
-    anon["market_value_eur_noisy"] = add_noise_value(raw["market_value_eur"])
+    # 4. Agrupamento por similaridade (NOVO)
+    anon = add_group_id(anon)
 
+    # 5. K-anonymity
     QIDS = ["age_bucket", "height_bucket", "pos_group", "region_nat"]
     anon = enforce_k_soft(anon, QIDS, k=k)
 
     return anon
 
-# Execução direta
+# ============================================================
+# MAIN
+# ============================================================
+
 if __name__ == "__main__":
-    os.makedirs("data", exist_ok=True)
-
-    xlsx_path = "data/players_raw.xlsx"
-    csv_path  = "data/players_raw.csv"
-
-    if os.path.exists(xlsx_path):
-        raw = pd.read_excel(xlsx_path, sheet_name="Players", engine="openpyxl")
-    elif os.path.exists(csv_path):
-        raw = pd.read_csv(csv_path)
-    else:
-        raise SystemExit("Nenhum arquivo de entrada encontrado em data/.")
-
-    out = anonymize(raw, k=3)
-
-    out.to_csv("data/players_anon.csv", sep=';', index=False, encoding='utf-8-sig')
-    print("CSV gerado -> data/players_anon.csv")
-
-    with pd.ExcelWriter("data/players_anon.xlsx", engine="openpyxl") as writer:
-        out.to_excel(writer, sheet_name="AnonPlayers", index=False)
-    print("Excel gerado -> data/players_anon.xlsx")
+    raw = pd.read_csv("data/players_raw.csv")
+    anon = anonymize(raw)
+    anon.to_csv("data/players_anon.csv", index=False)
+    print("Arquivo gerado: data/players_anon.csv")
