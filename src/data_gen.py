@@ -1,44 +1,39 @@
-import os
-import numpy as np
 import pandas as pd
+import numpy as np
+from faker import Faker
+import random
+import os
 
-os.makedirs('data', exist_ok=True)
+fake = Faker()
 
-np.random.seed(7)
-N = 200
-positions = ["GK","DEF","MID","FWD"]
-nations = ["Brazil","Argentina","Spain","Germany","USA","Japan","Nigeria"]
-leagues = [
-    "Serie A (BR)", "LaLiga", "Bundesliga",
-    "Premier League", "MLS", "J1 League", "Liga Profesional (AR)"
-]
+OUTPUT_FILE = "data/generated_raw_data.csv"
 
-rows = []
-for i in range(1, N+1):
-    pos = np.random.choice(positions, p=[0.1,0.35,0.35,0.2])
-    nat = np.random.choice(nations)
-    league = np.random.choice(leagues)
-    age = np.random.randint(17, 41)
-    height = int(np.random.normal({"GK":190,"DEF":184,"MID":178,"FWD":180}[pos], 5))
-    pace = int(np.clip(np.random.normal({"GK":40,"DEF":65,"MID":72,"FWD":82}[pos], 8), 20, 99))
-    value = int(np.random.lognormal(mean=15, sigma=0.35))
+def generate_player():
+    return {
+        "player_id": fake.uuid4(),
+        "name": fake.name(),
+        "age": random.randint(16, 40),
+        "height": round(random.uniform(1.60, 2.05), 2),
+        "weight": random.randint(55, 110),
+        "nationality": fake.country(),
+        "overall_rating": random.randint(50, 99),
+        "pace": random.randint(20, 99),
+        "shooting": random.randint(20, 99),
+        "passing": random.randint(20, 99),
+        "dribbling": random.randint(20, 99),
+        "defending": random.randint(20, 99),
+        "physical": random.randint(20, 99)
+    }
 
-    rows.append({
-        "player_name": f"Player{i:04d}",
-        "email": f"p{i:04d}@club.com",
-        "age": age,
-        "league": league,
-        "nationality": nat,
-        "position": pos,
-        "height_cm": height,
-        "pace": pace,
-        "market_value_eur": value
-    })
+def generate_dataset(n=500):
+    return pd.DataFrame([generate_player() for _ in range(n)])
 
-df = pd.DataFrame(rows)
+def ensure_data_folder():
+    if not os.path.exists("data"):
+        os.makedirs("data")
 
-excel_path = "data/players_raw.xlsx"
-with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-    df.to_excel(writer, sheet_name="Players", index=False)
-
-print(f"Arquivo Excel gerado com {len(df)} linhas. Cada valor está em sua célula.")
+if __name__ == "__main__":
+    ensure_data_folder()
+    df = generate_dataset(500)
+    df.to_csv(OUTPUT_FILE, index=False)
+    print(f"Arquivo gerado: {OUTPUT_FILE}")

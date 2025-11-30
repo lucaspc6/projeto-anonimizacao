@@ -1,149 +1,93 @@
 import pandas as pd
-import uuid
 import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+import hashlib
+import os
+
+INPUT_FILE = "data/generated_raw_data.csv"
+OUTPUT_FILE = "data/anonymized_data.csv"
 
 # ============================================================
-# Generalização fina dos atributos
+# 1 — CARREGAMENTO
 # ============================================================
 
-def bucket_age_fine(age):
-    if age <= 20: return "≤20"
-    if age <= 25: return "21–25"
-    if age <= 30: return "26–30"
-    if age <= 35: return "31–35"
-    return ">35"
-
-def bucket_height_fine(h):
-    if h < 170: return "<170"
-    if h < 180: return "170–179"
-    if h < 190: return "180–189"
-    return "≥190"
-
-def nat_to_region_fine(n):
-    eu = ["France", "Germany", "Spain", "Italy", "Portugal", "England"]
-    sa = ["Brazil", "Argentina"]
-    if n in eu: return "Europe"
-    if n in sa: return "South America"
-    return "Other"
+def load_data():
+    return pd.read_csv(INPUT_FILE)
 
 # ============================================================
-# Perturbação numérica
+# 2 — ANONIMIZAÇÃO
 # ============================================================
 
-def add_noise_value(val):
-    noise = np.random.uniform(-0.04, 0.04)
-    return int(val * (1 + noise))
+def hash_value(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()[:16]  # reduzido p/ não reidentificar
+
+def anonymize_direct_identifiers(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # Identificadores diretos
+    df["player_id"] = df["player_id"].apply(hash_value)
+    df["name"] = df["name"].apply(hash_value)
+    df["nationality"] = df["nationality"].apply(lambda x: x[:3])  # generalização mínima
+
+    return df
 
 # ============================================================
-# AGRUPAMENTO POR SIMILARIDADE (NOVO REQUISITO)
+# 3 — SUPRESSÃO E GENERALIZAÇÃO
 # ============================================================
 
-def group_players_by_similarity(df: pd.DataFrame) -> dict:
-    """
-    Agrupa jogadores por características similares:
-    - age_bucket
-    - height_bucket
-    - pos_group
-    """
-    groups = {}
+def generalize_numerical(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
 
-    for idx, row in df.iterrows():
-        key = (
-            str(row["age_bucket"]),
-            str(row["height_bucket"]),
-            str(row["pos_group"]),
-        )
+    # Faixas de idade
+    df["age"] = pd.cut(
+        df["age"],
+        bins=[0, 20, 25, 30, 35, 100],
+        labels=["<=20", "21-25", "26-30", "31-35", ">=36"]
+    )
 
-        if key not in groups:
-            groups[key] = []
+    # Altura arredondada para generalização
+    df["height"] = df["height"].apply(lambda x: round(x, 1))
 
-        groups[key].append(idx)
-
-    return groups
-
-
-def add_group_id(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Atribui um UUID para cada grupo de jogadores semelhantes.
-    """
-    out = df.copy()
-    groups = group_players_by_similarity(df)
-
-    out["group_id"] = None
-
-    for key, idx_list in groups.items():
-        gid = uuid.uuid4().hex
-        out.loc[idx_list, "group_id"] = gid
-
-    return out
+    return df
 
 # ============================================================
-# K-ANONIMIDADE SUAVE
+# 4 — AGRUPAMENTO K-MEANS PARA SIMILARIDADE
 # ============================================================
 
-def enforce_k_soft(df, quasi_identifiers, k=3):
-    """
-    Verifica se cada combinação QID tem pelo menos k elementos.
-    Se não tiver, generaliza automaticamente.
-    """
-    out = df.copy()
+CLUSTER_FEATURES = [
+    "overall_rating",
+    "pace", "shooting", "passing",
+    "dribbling", "defending", "physical",
+    "weight", "height"
+]
 
-    for q in quasi_identifiers:
-        out[q] = out[q].astype(str)
+def group_by_similarity(df: pd.DataFrame, n_clusters=8) -> pd.DataFrame:
+    df = df.copy()
 
-    while True:
-        counts = out.groupby(quasi_identifiers).size()
+    scaler = StandardScaler()
+    X = scaler.fit_transform(df[CLUSTER_FEATURES])
 
-        violators = counts[counts < k]
+    model = KMeans(n_clusters=n_clusters, random_state=42)
+    df["cluster"] = model.fit_predict(X)
 
-        if len(violators) == 0:
-            break
-
-        for key in violators.index:
-            mask = np.ones(len(key), dtype=bool)
-            generalization = "OTHER"
-            out.loc[
-                (out[quasi_identifiers] == key).all(axis=1),
-                quasi_identifiers[-1]
-            ] = generalization
-
-    return out
+    return df
 
 # ============================================================
-# PIPELINE COMPLETA DE ANONIMIZAÇÃO
+# 5 — EXECUÇÃO FINAL
 # ============================================================
 
-def anonymize(raw: pd.DataFrame, k: int = 3) -> pd.DataFrame:
-    anon = pd.DataFrame()
+def save(df: pd.DataFrame):
+    df.to_csv(OUTPUT_FILE, index=False)
+    print(f"Arquivo salvo: {OUTPUT_FILE}")
 
-    # 1. Criar identificador irreversível
-    anon["player_id"] = [uuid.uuid4().hex for _ in range(len(raw))]
-
-    # 2. Generalizações
-    anon["age_bucket"]    = raw["age"].map(bucket_age_fine)
-    anon["height_bucket"] = raw["height_cm"].map(bucket_height_fine)
-    anon["pos_group"]     = raw["position"]
-    anon["region_nat"]    = raw["nationality"].map(nat_to_region_fine)
-
-    # 3. Atributos não identificadores
-    anon["pace"] = raw["pace"]
-    anon["market_value_eur_noisy"] = raw["market_value_eur"].map(add_noise_value)
-
-    # 4. Agrupamento por similaridade (NOVO)
-    anon = add_group_id(anon)
-
-    # 5. K-anonymity
-    QIDS = ["age_bucket", "height_bucket", "pos_group", "region_nat"]
-    anon = enforce_k_soft(anon, QIDS, k=k)
-
-    return anon
-
-# ============================================================
-# MAIN
-# ============================================================
+def anonymize_dataset(df):
+    df = anonymize_direct_identifiers(df)
+    df = generalize_numerical(df)
+    return df
 
 if __name__ == "__main__":
-    raw = pd.read_csv("data/players_raw.csv")
-    anon = anonymize(raw)
-    anon.to_csv("data/players_anon.csv", index=False)
-    print("Arquivo gerado: data/players_anon.csv")
+    raw = load_data()
+    anon = anonymize_dataset(raw)
+    grouped = group_by_similarity(anon, n_clusters=8)
+    save(grouped)
