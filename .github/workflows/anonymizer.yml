@@ -24,8 +24,14 @@ jobs:
         python -m pip install --upgrade pip
         pip install pandas numpy scikit-learn faker
 
-    - name: Generate data
+    - name: Generate raw data
       run: python src/data_gen.py
+
+    - name: Upload raw dataset
+      uses: actions/upload-artifact@v4
+      with:
+        name: raw-dataset
+        path: data/generated_raw_data.csv
 
     - name: Run anonymizer
       run: python src/anonymizer.py
