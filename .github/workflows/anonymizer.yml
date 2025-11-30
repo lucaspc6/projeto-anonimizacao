@@ -1,0 +1,36 @@
+name: Run Anonymizer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  run-anonymizer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate raw data
+        run: python src/data_gen.py
+
+      - name: Run anonymizer
+        run: python src/anonymizer.py
+
+      - name: Upload anonymized files
+        uses: actions/upload-artifact@v3
+        with:
+          name: anonymized-data
+          path: data/*.csv
